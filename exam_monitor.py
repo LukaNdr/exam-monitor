@@ -365,9 +365,9 @@ def main() -> None:
     if not args.once:
         tg_send(f"▶️ მონიტორინგი დაიწყო: {ctr_name}, ყოველ {INTERVAL // 60} წუთში")
     while True:
-        run_check(cat_code, ctr_id, ctr_name)
+        ok = run_check(cat_code, ctr_id, ctr_name)
         if args.once:
-            return
+            sys.exit(0 if ok else 1)  # GitHub Actions-ში შეცდომა წითელ ✗-ად გამოჩნდება
         time.sleep(INTERVAL)
 
 
@@ -379,7 +379,7 @@ def load_state() -> dict:
     return st if "slots" in st else {"slots": st, "errors": 0}
 
 
-def run_check(cat_code, ctr_id, ctr_name) -> None:
+def run_check(cat_code, ctr_id, ctr_name) -> bool:
     """ერთი შემოწმება; მდგომარეობა state.json-ში ინახება, რომ გაშვებებს შორის შენარჩუნდეს."""
     st = load_state()
     prev = st["slots"]
@@ -398,6 +398,7 @@ def run_check(cat_code, ctr_id, ctr_name) -> None:
         if st["errors"] == 3:
             tg_send(f"⚠️ მონიტორი ზედიზედ 3-ჯერ ვერ შემოწმდა: {e}")
     STATE_FILE.write_text(json.dumps(st, ensure_ascii=False), encoding="utf-8")
+    return st["errors"] == 0
 
 
 if __name__ == "__main__":
