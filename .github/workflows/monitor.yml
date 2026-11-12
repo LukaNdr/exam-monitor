@@ -44,6 +44,8 @@ jobs:
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          CODE_URL: ${{ secrets.CODE_URL }}
+          CODE_URL_KEY: ${{ secrets.CODE_URL_KEY }}
           EXAM_CATEGORY: "1"
           EXAM_CENTER: "რუსთავ"
         run: python exam_monitor.py --once

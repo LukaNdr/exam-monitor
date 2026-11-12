@@ -163,6 +163,30 @@ def gmail_wait_for_code(since: float, max_wait: int = 150) -> str | None:
     return None
 
 
+# ---------------------------------------------------------------- Apps Script
+CODE_URL = os.getenv("CODE_URL", "").strip()
+CODE_URL_KEY = os.getenv("CODE_URL_KEY", "").strip()
+
+
+def script_wait_for_code(since: float, max_wait: int = 150) -> str | None:
+    """კოდს იღებს Gmail-ში ჩასმული Apps Script-იდან (gmail_code.gs)."""
+    deadline = time.time() + max_wait
+    while time.time() < deadline:
+        time.sleep(8)
+        try:
+            r = requests.get(CODE_URL, params={"key": CODE_URL_KEY, "since": int(since)}, timeout=30)
+            data = r.json()
+        except (requests.RequestException, ValueError) as e:
+            log(f"Apps Script შეცდომა: {e}")
+            continue
+        if data.get("error"):
+            log(f"Apps Script: {data['error']}")
+            return None
+        if data.get("code"):
+            return str(data["code"])
+    return None
+
+
 # ---------------------------------------------------------------- Auth
 def login() -> str:
     log("ავტორიზაცია...")
@@ -186,7 +210,9 @@ def login() -> str:
     log("კოდი გაიგზავნა " + ("მეილზე" if code_type == 4 else "SMS-ით") + ", ველოდები...")
 
     code = None
-    if code_type == 4 and GMAIL_APP_PASSWORD:
+    if code_type == 4 and CODE_URL and CODE_URL_KEY:
+        code = script_wait_for_code(sent_at)
+    if not code and code_type == 4 and GMAIL_APP_PASSWORD:
         code = gmail_wait_for_code(sent_at)
     if not code and TG_TOKEN and TG_CHAT_ID:
         code = tg_wait_for_code()
