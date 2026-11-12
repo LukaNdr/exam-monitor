@@ -2,7 +2,9 @@ name: Exam slot monitor
 
 on:
   schedule:
-    - cron: "*/5 * * * *"   # GitHub ხშირად 5-15 წუთით აგვიანებს
+    # თითო გაშვება ~55 წუთი მუშაობს და ზუსტად ყოველ 5 წუთში ამოწმებს.
+    # ხშირი cron უზრუნველყოფს, რომ რიგში ყოველთვის იდგეს შემდეგი გაშვება (concurrency ქვემოთ).
+    - cron: "*/5 * * * *"
   workflow_dispatch:         # ხელით გაშვება Actions ჩანართიდან
 
 concurrency:
@@ -15,7 +17,7 @@ permissions:
 jobs:
   check:
     runs-on: ubuntu-latest
-    timeout-minutes: 8
+    timeout-minutes: 65
     steps:
       - uses: actions/checkout@v4
 
@@ -48,7 +50,7 @@ jobs:
           CODE_URL_KEY: ${{ secrets.CODE_URL_KEY }}
           EXAM_CATEGORY: "1"
           EXAM_CENTER: "რუსთავ"
-        run: python exam_monitor.py --once
+        run: python exam_monitor.py --minutes 55
 
       - name: Save state
         if: always()

@@ -365,7 +365,8 @@ def main() -> None:
     ap.add_argument("--discover", action="store_true", help="ერთხელ შემოწმება და ნედლი JSON-ის ჩვენება")
     ap.add_argument("--chat-id", action="store_true", help="Telegram chat id-ის ჩვენება")
     ap.add_argument("--test-telegram", action="store_true")
-    ap.add_argument("--once", action="store_true", help="ერთი შემოწმება და გასვლა (GitHub Actions-ისთვის)")
+    ap.add_argument("--once", action="store_true", help="ერთი შემოწმება და გასვლა")
+    ap.add_argument("--minutes", type=int, default=0, help="ციკლი N წუთის განმავლობაში, მერე გასვლა (GitHub Actions)")
     args = ap.parse_args()
 
     if args.chat_id:
@@ -388,13 +389,18 @@ def main() -> None:
         print(json.dumps(check(cat_code, ctr_id, verbose=True), ensure_ascii=False, indent=1))
         return
 
-    if not args.once:
+    if not (args.once or args.minutes):
         tg_send(f"▶️ მონიტორინგი დაიწყო: {ctr_name}, ყოველ {INTERVAL // 60} წუთში")
+    started = time.time()
     while True:
+        tick = time.time()
         ok = run_check(cat_code, ctr_id, ctr_name)
         if args.once:
             sys.exit(0 if ok else 1)  # GitHub Actions-ში შეცდომა წითელ ✗-ად გამოჩნდება
-        time.sleep(INTERVAL)
+        if args.minutes and time.time() - started + INTERVAL > args.minutes * 60:
+            log("დრო ამოიწურა — შემდეგი გაშვება გააგრძელებს")
+            sys.exit(0 if ok else 1)
+        time.sleep(max(0, INTERVAL - (time.time() - tick)))  # ზუსტად ყოველ INTERVAL წამში
 
 
 def load_state() -> dict:
