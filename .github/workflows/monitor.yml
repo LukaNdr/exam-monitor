@@ -2,7 +2,7 @@ name: Exam slot monitor
 
 on:
   schedule:
-    # თითო გაშვება ~55 წუთი მუშაობს და ზუსტად ყოველ 5 წუთში ამოწმებს.
+    # თითო გაშვება ~5 სთ 40 წთ მუშაობს და ზუსტად ყოველ 5 წუთში ამოწმებს.
     # ხშირი cron უზრუნველყოფს, რომ რიგში ყოველთვის იდგეს შემდეგი გაშვება (concurrency ქვემოთ).
     - cron: "*/5 * * * *"
   workflow_dispatch:         # ხელით გაშვება Actions ჩანართიდან
@@ -17,7 +17,7 @@ permissions:
 jobs:
   check:
     runs-on: ubuntu-latest
-    timeout-minutes: 65
+    timeout-minutes: 355   # GitHub-ის ლიმიტი 360 წუთია
     steps:
       - uses: actions/checkout@v4
 
@@ -50,7 +50,7 @@ jobs:
           CODE_URL_KEY: ${{ secrets.CODE_URL_KEY }}
           EXAM_CATEGORY: "1"
           EXAM_CENTER: "რუსთავ"
-        run: python exam_monitor.py --minutes 55
+        run: python exam_monitor.py --minutes 340
 
       - name: Save state
         if: always()
