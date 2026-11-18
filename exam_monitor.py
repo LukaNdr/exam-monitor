@@ -175,6 +175,10 @@ def script_wait_for_code(since: float, max_wait: int = 150) -> str | None:
         time.sleep(8)
         try:
             r = requests.get(CODE_URL, params={"key": CODE_URL_KEY, "since": int(since)}, timeout=30)
+            if r.status_code == 404:
+                log("Apps Script ბმული აღარ არსებობს (404) — საჭიროა ხელახლა Deploy")
+                tg_send("⚠️ Gmail-ის Apps Script ბმული აღარ მუშაობს (404). კოდს ახლა Telegram-ით გთხოვ.")
+                return None
             data = r.json()
         except (requests.RequestException, ValueError) as e:
             log(f"Apps Script შეცდომა: {e}")
