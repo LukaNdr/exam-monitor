@@ -49,7 +49,7 @@ jobs:
           CODE_URL: ${{ secrets.CODE_URL }}
           CODE_URL_KEY: ${{ secrets.CODE_URL_KEY }}
           EXAM_CATEGORY: "1"
-          EXAM_CENTER: "რუსთავ"
+          EXAM_CENTER: "რუსთავ,გორ,თელავ"
         run: python exam_monitor.py --minutes 340
 
       - name: Save state

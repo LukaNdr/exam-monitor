@@ -61,7 +61,8 @@ GMAIL_APP_PASSWORD = os.getenv("GMAIL_APP_PASSWORD", "").replace(" ", "")
 TG_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TG_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 CATEGORY = os.getenv("EXAM_CATEGORY", "B")  # კატეგორიის კოდი ან სახელის ნაწილი
-CENTER = os.getenv("EXAM_CENTER", "რუსთავ")  # ცენტრის სახელის ნაწილი
+# ცენტრების სახელების ნაწილები, მძიმით გამოყოფილი
+CENTERS = [c.strip() for c in os.getenv("EXAM_CENTER", "რუსთავ").split(",") if c.strip()]
 INTERVAL = int(os.getenv("CHECK_INTERVAL_SECONDS", "300"))
 
 STATE_FILE = BASE_DIR / "state.json"
@@ -323,12 +324,15 @@ def resolve_ids(verbose=False):
     centers = api_get("DrivingLicenseTheoryExams/Centers", {"CategoryCode": cat_code})
     if verbose:
         print("Centers:", json.dumps(centers, ensure_ascii=False, indent=1)[:3000])
-    ctr = _find(centers, CENTER)
-    if not ctr:
-        raise RuntimeError(f"ცენტრი '{CENTER}' ვერ ვიპოვე")
-    ctr_id = _id(ctr, "serviceCenterId", "centerId", "id")
-    ctr_name = next((v for v in ctr.values() if isinstance(v, str) and CENTER.lower() in v.lower()), CENTER)
-    return cat_code, ctr_id, ctr_name
+    found = []
+    for want in CENTERS:
+        ctr = _find(centers, want)
+        if not ctr:
+            raise RuntimeError(f"ცენტრი '{want}' ვერ ვიპოვე")
+        ctr_id = _id(ctr, "serviceCenterId", "centerId", "id")
+        ctr_name = next((v for v in ctr.values() if isinstance(v, str) and want.lower() in v.lower()), want)
+        found.append((ctr_id, ctr_name))
+    return cat_code, found
 
 
 def check(cat_code, ctr_id, verbose=False) -> dict[str, list]:
@@ -387,18 +391,20 @@ def main() -> None:
     if not (SA_USERNAME and SA_PASSWORD):
         sys.exit("შეავსე SA_USERNAME და SA_PASSWORD .env ფაილში")
 
-    cat_code, ctr_id, ctr_name = resolve_ids(verbose=args.discover)
-    log(f"კატეგორია={cat_code}, ცენტრი={ctr_name} (id={ctr_id})")
+    cat_code, centers = resolve_ids(verbose=args.discover)
+    names = ", ".join(n for _, n in centers)
+    log(f"კატეგორია={cat_code}, ცენტრები: " + ", ".join(f"{n} (id={i})" for i, n in centers))
     if args.discover:
-        print(json.dumps(check(cat_code, ctr_id, verbose=True), ensure_ascii=False, indent=1))
+        for ctr_id, ctr_name in centers:
+            print(ctr_name, json.dumps(check(cat_code, ctr_id, verbose=True), ensure_ascii=False, indent=1))
         return
 
     if not (args.once or args.minutes):
-        tg_send(f"▶️ მონიტორინგი დაიწყო: {ctr_name}, ყოველ {INTERVAL // 60} წუთში")
+        tg_send(f"▶️ მონიტორინგი დაიწყო: {names}, ყოველ {INTERVAL // 60} წუთში")
     started = time.time()
     while True:
         tick = time.time()
-        ok = run_check(cat_code, ctr_id, ctr_name)
+        ok = run_check(cat_code, centers)
         if args.once:
             sys.exit(0 if ok else 1)  # GitHub Actions-ში შეცდომა წითელ ✗-ად გამოჩნდება
         if args.minutes and time.time() - started + INTERVAL > args.minutes * 60:
@@ -412,27 +418,41 @@ def load_state() -> dict:
         st = json.loads(STATE_FILE.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {"slots": {}, "errors": 0}
-    return st if "slots" in st else {"slots": st, "errors": 0}
+    if "slots" not in st:
+        st = {"slots": st, "errors": 0}
+    # ძველი ფორმატი (მხოლოდ რუსთავის თარიღები) -> {ცენტრი: {თარიღი: [დროები]}}
+    if any(isinstance(v, list) for v in st["slots"].values()):
+        st["slots"] = {"რუსთავი": st["slots"]}
+    return st
 
 
-def run_check(cat_code, ctr_id, ctr_name) -> bool:
-    """ერთი შემოწმება; მდგომარეობა state.json-ში ინახება, რომ გაშვებებს შორის შენარჩუნდეს."""
+def run_check(cat_code, centers) -> bool:
+    """ერთი შემოწმება ყველა ცენტრზე; მდგომარეობა state.json-ში ინახება გაშვებებს შორის."""
     st = load_state()
-    prev = st["slots"]
-    try:
-        slots = check(cat_code, ctr_id)
+    failed = None
+    summary = []
+    for ctr_id, ctr_name in centers:
+        prev = st["slots"].get(ctr_name, {})
+        try:
+            slots = check(cat_code, ctr_id)
+        except Exception as e:  # noqa: BLE001 — ერთი ცენტრის შეცდომამ სხვები არ უნდა გააჩეროს
+            failed = f"{ctr_name}: {e}"
+            log(f"შეცდომა ({failed})")
+            continue
         new = {d: t for d, t in slots.items() if d not in prev or set(t) - set(prev.get(d, []))}
         if new:
-            log(f"ახალი ადგილები: {new}")
+            log(f"{ctr_name} — ახალი ადგილები: {new}")
             tg_send(format_slots(new, ctr_name))
-        else:
-            log(f"ახალი ადგილი არ არის (სულ თარიღები: {len(slots)})")
-        st = {"slots": slots, "errors": 0}
-    except Exception as e:  # noqa: BLE001 — მონიტორი არ უნდა გაჩერდეს
+        summary.append(f"{ctr_name}: {len(slots)}")
+        st["slots"][ctr_name] = slots
+    if summary:
+        log("თარიღები — " + ", ".join(summary))
+    if failed:
         st["errors"] = st.get("errors", 0) + 1
-        log(f"შეცდომა: {e}")
         if st["errors"] == 3:
-            tg_send(f"⚠️ მონიტორი ზედიზედ 3-ჯერ ვერ შემოწმდა: {e}")
+            tg_send(f"⚠️ მონიტორი ზედიზედ 3-ჯერ ვერ შემოწმდა: {failed}")
+    else:
+        st["errors"] = 0
     STATE_FILE.write_text(json.dumps(st, ensure_ascii=False), encoding="utf-8")
     return st["errors"] == 0
 
