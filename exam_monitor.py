@@ -26,7 +26,8 @@ import os
 import re
 import sys
 import time
-from datetime import datetime
+from datetime import date, datetime
+from urllib.parse import quote
 from email.header import decode_header
 from pathlib import Path
 
@@ -64,6 +65,10 @@ CATEGORY = os.getenv("EXAM_CATEGORY", "B")  # კატეგორიის კ
 # ცენტრების სახელების ნაწილები, მძიმით გამოყოფილი
 CENTERS = [c.strip() for c in os.getenv("EXAM_CENTER", "რუსთავ").split(",") if c.strip()]
 INTERVAL = int(os.getenv("CHECK_INTERVAL_SECONDS", "300"))
+# ავტომატური დაჯავშნა: ცენტრების პრიორიტეტი = EXAM_CENTER-ის რიგი
+BOOK_ENABLED = os.getenv("BOOK_ENABLED", "0") == "1"
+BOOK_FROM_DATE = os.getenv("BOOK_FROM_DATE", "").strip()  # yyyy-mm-dd, ამ დღის ჩათვლით და შემდეგ
+LEGAL_TERMS_ID = 2  # საიტზე წესებზე თანხმობისას ფრონტენდი ყოველთვის 2-ს აგზავნის
 
 STATE_FILE = BASE_DIR / "state.json"
 TOKEN_FILE = BASE_DIR / ".token.json"
@@ -275,6 +280,17 @@ def api_get(path: str, params: dict | None = None):
         return r.json()
 
 
+def api_post(path: str, payload: dict):
+    for attempt in range(2):
+        r = session.post(API + path, json=payload, timeout=40,
+                         headers={"Authorization": "Bearer " + get_token(force=attempt > 0)})
+        if r.status_code == 401 and attempt == 0:
+            continue
+        if r.status_code >= 400:
+            raise RuntimeError(f"{r.status_code}: {r.text[:300]}")
+        return r.json() if r.content else {}
+
+
 # ---------------------------------------------------------------- Exam logic
 def _find(items: list, needle: str, prefer_keys=("code", "name")) -> dict | None:
     needle = needle.lower()
@@ -335,7 +351,7 @@ def resolve_ids(verbose=False):
     return cat_code, found
 
 
-def check(cat_code, ctr_id, verbose=False) -> dict[str, list]:
+def check(cat_code, ctr_id, verbose=False, frames_out: dict | None = None) -> dict[str, list]:
     dates = api_get("DrivingLicenseTheoryExams/Dates", {"CategoryCode": cat_code, "CenterId": ctr_id}) or []
     if verbose:
         print("Dates:", json.dumps(dates, ensure_ascii=False, indent=1)[:3000])
@@ -349,6 +365,8 @@ def check(cat_code, ctr_id, verbose=False) -> dict[str, list]:
             frames = []
         if verbose:
             print(f"DateFrames {ds}:", json.dumps(frames, ensure_ascii=False)[:1000])
+        if frames_out is not None:
+            frames_out[ds] = [f for f in frames if isinstance(f, dict)]
         times = []
         for f in frames:
             if isinstance(f, dict):
@@ -429,12 +447,15 @@ def load_state() -> dict:
 def run_check(cat_code, centers) -> bool:
     """ერთი შემოწმება ყველა ცენტრზე; მდგომარეობა state.json-ში ინახება გაშვებებს შორის."""
     st = load_state()
+    handle_commands(st)
     failed = None
     summary = []
+    frames_by_center: dict[str, dict] = {}
     for ctr_id, ctr_name in centers:
         prev = st["slots"].get(ctr_name, {})
         try:
-            slots = check(cat_code, ctr_id)
+            frames_by_center[ctr_name] = {}
+            slots = check(cat_code, ctr_id, frames_out=frames_by_center[ctr_name])
         except Exception as e:  # noqa: BLE001 — ერთი ცენტრის შეცდომამ სხვები არ უნდა გააჩეროს
             failed = f"{ctr_name}: {e}"
             log(f"შეცდომა ({failed})")
@@ -447,6 +468,10 @@ def run_check(cat_code, centers) -> bool:
         st["slots"][ctr_name] = slots
     if summary:
         log("თარიღები — " + ", ".join(summary))
+    try:
+        maybe_book(cat_code, centers, frames_by_center, st)
+    except Exception as e:  # noqa: BLE001
+        log(f"დაჯავშნის შეცდომა: {e}")
     if failed:
         st["errors"] = st.get("errors", 0) + 1
         if st["errors"] == 3:
@@ -455,6 +480,130 @@ def run_check(cat_code, centers) -> bool:
         st["errors"] = 0
     STATE_FILE.write_text(json.dumps(st, ensure_ascii=False), encoding="utf-8")
     return st["errors"] == 0
+
+
+# ---------------------------------------------------------------- Booking
+def _as_date(ds: str) -> date | None:
+    try:
+        return date.fromisoformat(_to_iso(ds))
+    except ValueError:
+        return None
+
+
+def pick_slot(centers, frames_by_center, failed: set):
+    """პრიორიტეტით (ცენტრების რიგი) პირველი ცენტრი, სადაც BOOK_FROM_DATE-ის შემდეგ ადგილია;
+    მასში — ყველაზე ადრეული თარიღი და დრო."""
+    limit = date.fromisoformat(BOOK_FROM_DATE) if BOOK_FROM_DATE else None
+    for _ctr_id, ctr_name in centers:
+        cands = []
+        for ds, frames in frames_by_center.get(ctr_name, {}).items():
+            d = _as_date(ds)
+            if d is None or (limit and d < limit):
+                continue
+            for f in frames:
+                tid = f.get("timeFrameId")
+                if tid is None or str(tid) in failed:
+                    continue
+                cands.append((d, str(f.get("timeFrameName") or ""), tid, ds))
+        if cands:
+            cands.sort(key=lambda c: (c[0], c[1]))
+            d, tname, tid, ds = cands[0]
+            return {"center": ctr_name, "date": ds, "time": tname, "timeFrameId": tid}
+    return None
+
+
+def payment_link(invoice_no) -> str | None:
+    """გადახდის ბმული: ჯერ TBC/UFC ბარათით, თუ არ გამოვიდა — UPS."""
+    try:
+        r = api_post("UfcPayments/RegisterTransaction", {"invoiceNumber": invoice_no})
+        url, tid = r.get("redirectUrl"), r.get("transactionId")
+        if url and tid:
+            sep = "&" if "?" in url else "?"
+            return f"{url}{sep}trans_id={quote(str(tid), safe='')}"
+    except Exception as e:  # noqa: BLE001
+        log(f"UFC გადახდის ბმული ვერ შეიქმნა: {e}")
+    try:
+        r = api_post("UPSPayments/CreateTransaction", {"invoiceNumber": invoice_no, "language": "GE"})
+        if r.get("proceedUrl"):
+            return r["proceedUrl"]
+    except Exception as e:  # noqa: BLE001
+        log(f"UPS გადახდის ბმული ვერ შეიქმნა: {e}")
+    return None
+
+
+def maybe_book(cat_code, centers, frames_by_center, st) -> None:
+    if not BOOK_ENABLED or st.get("booking"):
+        return
+    failed = set(st.setdefault("failed_frames", []))
+    slot = pick_slot(centers, frames_by_center, failed)
+    if not slot:
+        return
+    where = f"{slot['center']}, {slot['date']} {slot['time']}".strip()
+    log(f"ვჯავშნი: {where}")
+    try:
+        inv = api_post("DrivingLicenseTheoryExams/Invoice", {
+            "CategoryCode": int(cat_code) if str(cat_code).isdigit() else cat_code,
+            "timeFrameId": slot["timeFrameId"],
+            "acceptedLegalTermsId": LEGAL_TERMS_ID,
+        })
+        invoice_no = inv.get("invoiceNumber")
+        if not invoice_no:
+            raise RuntimeError("ინვოისის ნომერი არ დაბრუნდა: " + json.dumps(inv, ensure_ascii=False)[:300])
+    except Exception as e:  # noqa: BLE001
+        st["failed_frames"].append(str(slot["timeFrameId"]))
+        log(f"ჯავშანი ვერ მოხერხდა: {e}")
+        tg_send(f"⚠️ ჯავშანი ვერ მოხერხდა ({where}):\n{e}\n\nსხვა ადგილს შემდეგ შემოწმებაზე ვცდი.")
+        return
+
+    link = payment_link(invoice_no)
+    price = inv.get("price")
+    st["booking"] = {**slot, "invoice": invoice_no, "price": price,
+                     "link": link, "at": datetime.now().isoformat(timespec="seconds")}
+    lines = [
+        "✅ ადგილი დაჯავშნილია — გადაიხადე, რომ ჩაწერა დასრულდეს!",
+        f"📍 {slot['center']}",
+        f"📅 {slot['date']}" + (f"  🕐 {slot['time']}" if slot["time"] else ""),
+        f"🧾 ინვოისი: {invoice_no}" + (f"  💰 {price} ₾" if price is not None else ""),
+        "",
+        f"💳 გადახდა: {link}" if link else "💳 გადახდის ბმული ვერ შეიქმნა.",
+        "თუ ბმული არ გაიხსნა: https://my.sa.gov.ge → გამოცდაზე ჩაწერა → გადახდა",
+        "",
+        "ახალ ჯავშანს აღარ გავაკეთებ. თუ ეს ჯავშანი გაუქმდა ან სხვა გინდა, მომწერე /reset",
+    ]
+    tg_send("\n".join(lines))
+
+
+def handle_commands(st) -> None:
+    """Telegram ბრძანებები: /status, /reset (ახალი ჯავშნის ნებართვა)."""
+    global _tg_offset
+    if not (TG_TOKEN and TG_CHAT_ID):
+        return
+    _tg_offset = max(_tg_offset, int(st.get("tg_offset", 0)))
+    try:
+        updates = tg_updates()
+    except Exception:  # noqa: BLE001
+        return
+    st["tg_offset"] = _tg_offset  # გაშვებებს შორის ინახება, რომ ძველი ბრძანება თავიდან არ შესრულდეს
+    for u in updates:
+        msg = u.get("message") or {}
+        if str(msg.get("chat", {}).get("id")) != str(TG_CHAT_ID):
+            continue
+        cmd = (msg.get("text") or "").strip().lower()
+        if cmd.startswith("/reset"):
+            st.pop("booking", None)
+            st["failed_frames"] = []
+            tg_send("🔄 კარგი, ახალ თავისუფალ ადგილს ისევ დავჯავშნი.")
+        elif cmd.startswith("/status"):
+            b = st.get("booking")
+            if b:
+                tg_send(f"📌 აქტიური ჯავშანი: {b['center']} {b['date']} {b.get('time', '')}, "
+                        f"ინვოისი {b['invoice']}\n{b.get('link') or ''}")
+            else:
+                mode = "გამორთულია"
+                if BOOK_ENABLED:
+                    mode = "ჩართულია" + (f", {BOOK_FROM_DATE}-დან" if BOOK_FROM_DATE else "")
+                names = ", ".join(st.get("slots", {}).keys()) or "-"
+                tg_send(f"🔎 ვეძებ: {names}. ჯავშანი ჯერ არ არის. ავტოჯავშანი {mode}.")
 
 
 if __name__ == "__main__":

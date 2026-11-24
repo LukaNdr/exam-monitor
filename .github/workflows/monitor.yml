@@ -50,6 +50,8 @@ jobs:
           CODE_URL_KEY: ${{ secrets.CODE_URL_KEY }}
           EXAM_CATEGORY: "1"
           EXAM_CENTER: "რუსთავ,გორ,თელავ"
+          BOOK_ENABLED: "1"
+          BOOK_FROM_DATE: "2026-12-20"
         run: python exam_monitor.py --minutes 340
 
       - name: Save state
