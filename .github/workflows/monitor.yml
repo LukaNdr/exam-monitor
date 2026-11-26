@@ -1,11 +1,11 @@
 name: Exam slot monitor
 
 on:
-  schedule:
-    # თითო გაშვება ~5 სთ 40 წთ მუშაობს და ზუსტად ყოველ 5 წუთში ამოწმებს.
-    # ხშირი cron უზრუნველყოფს, რომ რიგში ყოველთვის იდგეს შემდეგი გაშვება (concurrency ქვემოთ).
-    - cron: "*/5 * * * *"
-  workflow_dispatch:         # ხელით გაშვება Actions ჩანართიდან
+  # ავტომატური გაშვება გათიშულია (მიზანი მიღწეულია).
+  # თავიდან ჩასართავად დააბრუნე:
+  #   schedule:
+  #     - cron: "*/5 * * * *"
+  workflow_dispatch:         # მხოლოდ ხელით გაშვება Actions ჩანართიდან
 
 concurrency:
   group: exam-monitor
